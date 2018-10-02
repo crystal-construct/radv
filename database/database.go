@@ -5,6 +5,7 @@
 package database
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"log"
 
@@ -16,15 +17,19 @@ type Triplestore struct {
 	iopts badger.IteratorOptions
 }
 
+const hashKeySpace = uint64(9223372036854775807)
+
 type FieldPrefix []byte
 
 var (
-	dbEmpty FieldPrefix = []byte{}
-	dbKey   FieldPrefix = []byte{0}
-	dbSPO   FieldPrefix = []byte{1}
-	dbPOS   FieldPrefix = []byte{2}
-	dbSOP   FieldPrefix = []byte{3}
-	dbValue FieldPrefix = []byte{4}
+	dbEmpty   FieldPrefix = []byte{}
+	dbKey     FieldPrefix = []byte{0}
+	dbSPO     FieldPrefix = []byte{1}
+	dbPOS     FieldPrefix = []byte{2}
+	dbSOP     FieldPrefix = []byte{3}
+	dbValue   FieldPrefix = []byte{4}
+	dbHash    FieldPrefix = []byte{5}
+	dbHashKey FieldPrefix = []byte{6}
 )
 
 type Field int
@@ -184,20 +189,16 @@ func (t *Triplestore) Put(subject interface{}, predicate interface{}, object int
 }
 func (t *Triplestore) put(txn *badger.Txn, si []byte, pi []byte, oi []byte) error {
 
-	spo := zcopy(dbSPO, si, pi, oi)
-	sop := zcopy(dbSOP, si, oi, pi)
-	pos := zcopy(dbPOS, pi, oi, si)
-	err := txn.Set(spo, []byte{})
-	if err != nil {
-		return err
+	combinations := [][][]byte{
+		{dbSPO, si, pi, oi},
+		{dbSOP, si, oi, pi},
+		{dbPOS, pi, oi, si},
 	}
-	err = txn.Set(sop, []byte{})
-	if err != nil {
-		return err
-	}
-	err = txn.Set(pos, []byte{})
-	if err != nil {
-		return err
+	for _, i := range combinations {
+		err := txn.Set(zcopy(i...), []byte{})
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -216,10 +217,19 @@ func zcopy(slices ...[]byte) []byte {
 }
 
 func (t *Triplestore) getId(txn *badger.Txn, value []byte, create bool) ([]byte, error) {
-	dval := append(dbValue, value...)
+	var v, seek []byte
+	var rawid *badger.Item
+	var err error
+	v = append(dbValue, value...)
+	if len(value) > 39 {
+		hash := sha256.Sum256(v)
+		seek = append(dbHash, hash[:]...)
+	} else {
+		seek = v
+	}
 	ret := make([]byte, 9)
 
-	rawid, err := txn.Get(dval)
+	rawid, err = txn.Get(seek)
 	if err != badger.ErrKeyNotFound {
 		err2 := rawid.Value(func(val []byte) {
 			ret = val
@@ -238,36 +248,72 @@ func (t *Triplestore) getId(txn *badger.Txn, value []byte, create bool) ([]byte,
 	if seqerr != nil {
 		return nil, seqerr
 	}
+	defer seq.Release()
+	return storeValue(txn, seq, v)
+}
+
+func storeValue(txn *badger.Txn, seq *badger.Sequence, dVal []byte) ([]byte, error) {
+	// Get the next available ID in sequence
 	key, err := seq.Next()
 	if err != nil {
 		return nil, err
 	}
-	raw := make([]byte, 8)
-	binary.LittleEndian.PutUint64(raw, key)
-	ret = append(dbKey, raw...)
-	seq.Release()
-	err = txn.Set(ret, dval)
-	if err != nil {
-		return nil, err
+
+	return store(txn, key, dVal)
+}
+
+func store(txn *badger.Txn, key uint64, value []byte) ([]byte, error) {
+	k := make([]byte, 9)
+	raw := make([]byte, 9)
+
+	// If the value length > 40, generate a sha256 for the lookup
+	if len(value) > 40 {
+		binary.LittleEndian.PutUint64(k[1:9], key+hashKeySpace)
+		k[0] = dbHashKey[0]
+		hash := sha256.Sum256(value)
+		raw = append(dbHash, hash[:]...)
+		err := txn.Set(k, value)
+		if err != nil {
+			return nil, err
+		}
+		err = txn.Set(raw, k)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		binary.LittleEndian.PutUint64(k[1:9], key)
+		k[0] = dbKey[0]
+		err := txn.Set(k, value)
+		if err != nil {
+			return nil, err
+		}
+		err = txn.Set(value, k)
+		if err != nil {
+			return nil, err
+		}
 	}
-	err = txn.Set(dval, ret)
-	if err != nil {
-		return nil, err
-	}
-	return ret, err
+	return k, nil
 }
 
 func (t *Triplestore) Materialize(keys [][]byte) []interface{} {
-	res := make([]interface{}, 0)
+	res := make([]interface{}, len(keys))
 	err := t.db.View(func(txn *badger.Txn) error {
-		for _, i := range keys {
+		for j, i := range keys {
 			value, err := txn.Get(i)
 			if err != nil {
 				return err
 			}
 			value.Value(func(val []byte) {
-				rval := unmarshal(val[1:])
-				res = append(res, rval)
+				if val[0] == dbHash[0] {
+					value2, _ := txn.Get(val)
+					value2.Value(func(val2 []byte) {
+						rval := unmarshal(val[1:])
+						res[j] = rval
+					})
+				} else {
+					rval := unmarshal(val[1:])
+					res[j] = rval
+				}
 			})
 		}
 		return nil

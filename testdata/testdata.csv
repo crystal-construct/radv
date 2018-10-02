@@ -1,0 +1,10 @@
+"John","Knows","Jane"
+"Jane","Knows","Emily"
+"Peter","Knows","Emily"
+"Jane","Knows","Peter"
+"Tim","Knows","Peter"
+"John","Age",50
+"Jane","Age",45
+"Emily","Age",23
+"Tim","Age",34
+"Peter","Age",14
