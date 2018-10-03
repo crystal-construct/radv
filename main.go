@@ -15,17 +15,17 @@ import (
 )
 
 func main() {
-	db := database.New()
+	db := database.New("data")
 	defer db.Close()
 	file, _ := os.Open("testdata/testdata.csv")
 	defer file.Close()
 	rdr := csv.NewReader(file)
 	for {
-		line, error := rdr.Read()
-		if error == io.EOF {
+		line, err := rdr.Read()
+		if err == io.EOF {
 			break
-		} else if error != nil {
-			log.Fatal(error)
+		} else if err != nil {
+			log.Fatal(err)
 		}
 		db.Put(line[0], line[1], line[2])
 	}
