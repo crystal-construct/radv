@@ -20,3 +20,12 @@ func unmarshal(b []byte) interface{} {
 	}
 	return val
 }
+
+func unmarshalState(b []byte) State {
+	var val State
+	err := velocypack.Unmarshal(b, &val)
+	if err != nil {
+		panic(err)
+	}
+	return val
+}

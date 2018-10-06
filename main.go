@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 
 	"./database"
 )
@@ -30,16 +31,36 @@ func main() {
 		db.Put(line[0], line[1], line[2])
 	}
 
-	fmt.Println("Who does John know?")
-	JohnFriends, _ := db.Get("John", "Knows", nil)
-	fmt.Println(db.Materialize(JohnFriends))
+	var Subject = "John"
 
-	fmt.Println("Who do they know?")
+	fmt.Printf("Q: Who does %+v know?\n", Subject)
+	JohnFriends, _ := db.Get(Subject, "Knows", nil)
+	fmt.Println("A:", db.Materialize(JohnFriends))
+
+	fmt.Printf("Q: Who does %+v know?\n", db.Materialize(JohnFriends))
 	foaf, _ := db.Get(JohnFriends, "Knows", nil)
-	fmt.Println(db.Materialize(foaf))
+	fmt.Println("A:", db.Materialize(foaf))
 
-	fmt.Println("How old are they?")
+	fmt.Printf("Q: How old is %+v?\n", db.Materialize(foaf))
 	foafAge, _ := db.Get(foaf, "Age", nil)
-	fmt.Println(db.Materialize(foafAge))
+	fmt.Println("A:", db.Materialize(foafAge))
+
+	initialState := database.State{
+	}
+
+	t := time.Now()
+	// A traversal starting with people John knows
+	err:= db.Traverse("John", "Knows", nil, initialState, func(subjectId []byte, predicateId []byte, objectId []byte, state database.State) (database.State, [][]byte, error) {
+		// Print out the path for each traversal
+		fmt.Println(db.Materialize(state.Path))
+		// Get the next triples to traverse
+		next, _ := db.Get(objectId, "Knows", nil)
+		// pass the state to the next traversal
+		return state, next, nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("Traversl took: ", time.Since(t))
 
 }

@@ -7,7 +7,9 @@ package database
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"log"
+	"sync"
 
 	"github.com/dgraph-io/badger"
 )
@@ -17,21 +19,31 @@ type Triplestore struct {
 	iopts badger.IteratorOptions
 }
 
+type State struct {
+	Path [][]byte
+	Val  float64
+}
+
 const hashKeySpace = uint64(9223372036854775807)
 
 type FieldPrefix []byte
+type TriplePrefix byte
+
+var dbEmpty = make([]byte, 1)
 
 var (
-	dbEmpty FieldPrefix = make([]byte, 0)
 
 	// Prefixes for different kinds of database keys
 	dbKey     FieldPrefix = []byte{0}
-	dbSPO     FieldPrefix = []byte{1}
-	dbPOS     FieldPrefix = []byte{2}
-	dbSOP     FieldPrefix = []byte{3}
 	dbValue   FieldPrefix = []byte{4}
 	dbHash    FieldPrefix = []byte{5}
 	dbHashKey FieldPrefix = []byte{6}
+)
+
+var (
+	dbSPO TriplePrefix = 1
+	dbPOS TriplePrefix = 2
+	dbSOP TriplePrefix = 3
 )
 
 // Constants to describe fields
@@ -98,8 +110,7 @@ func (t *Triplestore) Get(subject interface{}, predicate interface{}, object int
 	for {
 		tr, more := <-triples
 		if more {
-			kr := tr[19:]
-			res = append(res, kr)
+			res = append(res, tr)
 		} else {
 			break
 		}
@@ -110,21 +121,28 @@ func (t *Triplestore) Get(subject interface{}, predicate interface{}, object int
 func (t *Triplestore) get(txn *badger.Txn, sarr [][]byte, parr [][]byte, oarr [][]byte, triples chan []byte) {
 
 	// Loop through the cartesian combinations of keys
-	for _, si := range sarr {
-		for _, pi := range parr {
-			for _, oi := range oarr {
+	for _, s := range sarr {
+		for _, p := range parr {
+			for _, o := range oarr {
+				si := Answer(s)
+				pi := Answer(p)
+				oi := Answer(o)
 				var prefix []byte
 				it := txn.NewIterator(t.iopts)
 				// work out which prefix to use for the key lookup
 				switch {
 				case si != nil && pi != nil && oi != nil:
-					prefix = multiAppend(dbSPO, si, pi, oi)
+					prefix = multiAppend(dbEmpty, si, pi, oi)
+					prefix[0] = byte(dbSPO)
 				case si != nil && pi != nil:
-					prefix = multiAppend(dbSPO, si, pi)
+					prefix = multiAppend(dbEmpty, si, pi)
+					prefix[0] = byte(dbSPO)
 				case pi != nil && oi != nil:
-					prefix = multiAppend(dbPOS, pi, oi)
+					prefix = multiAppend(dbEmpty, pi, oi)
+					prefix[0] = byte(dbPOS)
 				case si != nil && oi != nil:
-					prefix = multiAppend(dbSOP, si, oi)
+					prefix = multiAppend(dbEmpty, si, oi)
+					prefix[0] = byte(dbSOP)
 				}
 
 				//Loop through and stream the results
@@ -138,6 +156,20 @@ func (t *Triplestore) get(txn *badger.Txn, sarr [][]byte, parr [][]byte, oarr []
 
 	close(triples)
 	return
+}
+
+// Answer returns the last part of an ordered triple (usually the answer to a query)
+func Answer(bytes []byte) []byte {
+	if bytes == nil {
+		return nil
+	}
+	if len(bytes) == 9 {
+		return bytes
+	}
+	if len(bytes) == 28 {
+		return bytes[19:]
+	}
+	panic(fmt.Errorf("Bad Key"))
 }
 
 func (t *Triplestore) toKeys(txn *badger.Txn, input interface{}, create bool) ([][]uint8, error) {
@@ -175,34 +207,7 @@ func (t *Triplestore) Put(subject interface{}, predicate interface{}, object int
 	txn := t.db.NewTransaction(true)
 	defer txn.Discard()
 
-	// convert all input values to binary
-	s, err := marshal(subject)
-	if err != nil {
-		return err
-	}
-	p, err := marshal(predicate)
-	if err != nil {
-		return err
-	}
-	o, err := marshal(object)
-	if err != nil {
-		return err
-	}
-
-	// Get the ID for each input value
-	si, err := t.getID(txn, s, true)
-	if err != nil {
-		return err
-	}
-	pi, err := t.getID(txn, p, true)
-	if err != nil {
-		return err
-	}
-	oi, err := t.getID(txn, o, true)
-	if err != nil {
-		return err
-	}
-
+	si, pi, oi, err := t.toIDs(txn, subject, predicate, object, true)
 	// Write the values to the database
 	err = t.put(txn, si, pi, oi)
 	if err != nil {
@@ -215,13 +220,43 @@ func (t *Triplestore) Put(subject interface{}, predicate interface{}, object int
 	})
 	return err
 }
-func (t *Triplestore) put(txn *badger.Txn, si []byte, pi []byte, oi []byte) error {
+func (t *Triplestore) toIDs(txn *badger.Txn, subject interface{}, predicate interface{}, object interface{}, b bool) ([]byte, []byte, []byte, error) {
+	// convert all input values to ids
+	si, err := t.toID(txn, subject)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	pi, err := t.toID(txn, predicate)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	oi, err := t.toID(txn, object)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
+	return si, pi, oi, nil
+}
+
+func (t *Triplestore) toID(txn *badger.Txn, value interface{}) ([]byte, error) {
+	s, err := marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	// Get the ID for each input value
+	si, err := t.getID(txn, s, true)
+	if err != nil {
+		return nil, err
+	}
+	return si, nil
+}
+
+func (t *Triplestore) put(txn *badger.Txn, si []byte, pi []byte, oi []byte) error {
 	// The 3 conbinationss of keys we store
 	combinations := [][][]byte{
-		{dbSPO, si, pi, oi},
-		{dbSOP, si, oi, pi},
-		{dbPOS, pi, oi, si},
+		{[]byte{byte(dbSPO)}, si, pi, oi},
+		{[]byte{byte(dbSOP)}, si, oi, pi},
+		{[]byte{byte(dbPOS)}, pi, oi, si},
 	}
 	for _, i := range combinations {
 		// Write each combination
@@ -342,7 +377,8 @@ func (t *Triplestore) Materialize(keys [][]byte) []interface{} {
 	// Open a read only view
 	err := t.db.View(func(txn *badger.Txn) error {
 		// Loop through the keys
-		for j, i := range keys {
+		for j, k := range keys {
+			i := Answer(k)
 			// Get the entry
 			value, err := txn.Get(i)
 			if err != nil {
@@ -368,4 +404,98 @@ func (t *Triplestore) Materialize(keys [][]byte) []interface{} {
 		panic(err)
 	}
 	return res
+}
+
+type TraversalFunction func(subjectId []byte, predicateId []byte, objectId []byte, state State) (State, [][]byte, error)
+
+func subjectPredicateObject(triple []byte) ([]byte, []byte, []byte) {
+	tripleType := TriplePrefix(triple[0])
+	a := triple[1:10]
+	b := triple[10:19]
+	c := triple[19:28]
+	switch tripleType {
+	case dbSPO:
+		return a, b, c
+	case dbPOS:
+		return c, a, b
+	case dbSOP:
+		return a, c, b
+	}
+	return nil, nil, nil
+}
+
+func (t *Triplestore) Traverse(
+	subject interface{},
+	predicate interface{},
+	object interface{},
+	initialState State,
+	traversalFunc TraversalFunction) error {
+
+	// Create a read-only transaction
+	txn := t.db.NewTransaction(false)
+	defer txn.Discard()
+
+	//Convert subject, predicate and object into [][]byte{} containing a list of keys
+	sarr, err := t.toKeys(txn, subject, false)
+	if err != nil {
+		return err
+	}
+
+	parr, err := t.toKeys(txn, predicate, false)
+	if err != nil {
+		return err
+	}
+
+	oarr, err := t.toKeys(txn, object, false)
+	if err != nil {
+		return err
+	}
+
+	//Create a results array, and a channel to receive the results stream
+
+	triples := make(chan []byte)
+	errors := make(chan error)
+	complete := make(chan struct{})
+	wg := sync.WaitGroup{}
+
+	// Fire off the query, and collate the results
+	go t.get(txn, sarr, parr, oarr, triples)
+
+	wg.Add(1)
+	go func() {
+		for {
+			tr, more := <-triples
+			if more {
+				wg.Add(1)
+				go func(){
+					defer wg.Done()
+					recurse(txn, tr, initialState, traversalFunc, errors)
+				}()
+			} else {
+				break
+			}
+		}
+		wg.Done()
+		wg.Wait()
+		complete <- struct{}{}
+	}()
+
+	select {
+		case <- complete:
+			return nil
+		case err := <- errors:
+			return err
+	}
+}
+
+func recurse(txn *badger.Txn, triple []byte, state State, f TraversalFunction, errors chan error) {
+	state.Path = append(state.Path, triple)
+	s, p, o := subjectPredicateObject(triple)
+	newstate, next, err := f(s, p, o, state)
+	if err != nil {
+		errors <- err
+	}
+	for _, i := range next {
+		recurse(txn, i, newstate, f, errors)
+	}
 }
