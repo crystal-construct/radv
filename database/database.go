@@ -408,10 +408,6 @@ func (t *Triplestore) Materialize(keys [][]byte) []interface{} {
 
 type TraversalFunction func(subjectId []byte, predicateId []byte, objectId []byte, state State) (State, [][]byte, error)
 
-func (t *Triplestore) Test(key []byte) {
-	subjectPredicateObject(key)
-}
-
 func subjectPredicateObject(triple []byte) ([]byte, []byte, []byte) {
 	tripleType := TriplePrefix(triple[0])
 	a := triple[1:10]
@@ -467,7 +463,6 @@ func (t *Triplestore) Traverse(
 
 	wg.Add(1)
 	go func() {
-		defer wg.Done()
 		for {
 			tr, more := <-triples
 			if more {
@@ -480,9 +475,10 @@ func (t *Triplestore) Traverse(
 				break
 			}
 		}
+		wg.Done()
+		wg.Wait()
 		complete <- struct{}{}
 	}()
-
 
 	select {
 		case <- complete:

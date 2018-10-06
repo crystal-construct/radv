@@ -36,7 +36,6 @@ func main() {
 	fmt.Printf("Q: Who does %+v know?\n", Subject)
 	JohnFriends, _ := db.Get(Subject, "Knows", nil)
 	fmt.Println("A:", db.Materialize(JohnFriends))
-	db.Test(JohnFriends[0])
 
 	fmt.Printf("Q: Who does %+v know?\n", db.Materialize(JohnFriends))
 	foaf, _ := db.Get(JohnFriends, "Knows", nil)
@@ -51,7 +50,7 @@ func main() {
 
 	t := time.Now()
 	// A traversal starting with people John knows
-	db.Traverse("John", "Knows", nil, initialState, func(subjectId []byte, predicateId []byte, objectId []byte, state database.State) (database.State, [][]byte, error) {
+	err:= db.Traverse("John", "Knows", nil, initialState, func(subjectId []byte, predicateId []byte, objectId []byte, state database.State) (database.State, [][]byte, error) {
 		// Print out the path for each traversal
 		fmt.Println(db.Materialize(state.Path))
 		// Get the next triples to traverse
@@ -59,6 +58,9 @@ func main() {
 		// pass the state to the next traversal
 		return state, next, nil
 	})
+	if err != nil {
+		panic(err)
+	}
 	fmt.Println("Traversl took: ", time.Since(t))
 
 }
