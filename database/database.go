@@ -277,8 +277,9 @@ func (t *Triplestore) getID(txn *badger.Txn, value []byte, create bool) ([]byte,
 		}
 
 		// We have a key to return
-		err2 := rawid.Value(func(val []byte) {
+		err2 := rawid.Value(func(val []byte) error {
 			ret = val
+			return nil
 		})
 		if err2 != nil {
 			return nil, err2
@@ -347,18 +348,18 @@ func (t *Triplestore) Materialize(keys [][]byte) []interface{} {
 			if err != nil {
 				return err
 			}
-			value.Value(func(val []byte) {
+			getValue := func(val []byte) error {
+				rval := unmarshal(val[1:])
+				res[j] = rval
+				return nil
+			}
+			value.Value(func(val []byte) error {
 				if val[0] == dbHash[0] {
 					// If the value starts with the dbHash identifier, jump and get the actual value
 					value2, _ := txn.Get(val)
-					value2.Value(func(val2 []byte) {
-						rval := unmarshal(val[1:])
-						res[j] = rval
-					})
-				} else {
-					rval := unmarshal(val[1:])
-					res[j] = rval
+					return value2.Value(getValue)
 				}
+				return getValue(val)
 			})
 		}
 		return nil
