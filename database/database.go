@@ -24,6 +24,10 @@ type State struct {
 	Val  float64
 }
 
+type TraversalOptions struct {
+	InitialState State
+}
+
 const hashKeySpace = uint64(9223372036854775807)
 
 type FieldPrefix []byte
@@ -425,7 +429,7 @@ func (t *Triplestore) Traverse(
 	subject interface{},
 	predicate interface{},
 	object interface{},
-	initialState State,
+	options TraversalOptions,
 	traversalFunc TraversalFunction) error {
 
 	// Create a read-only transaction
@@ -466,7 +470,7 @@ func (t *Triplestore) Traverse(
 				wg.Add(1)
 				go func(){
 					defer wg.Done()
-					recurse(txn, tr, initialState, traversalFunc, errors)
+					recurse(txn, tr, options.InitialState, traversalFunc, errors)
 				}()
 			} else {
 				break
