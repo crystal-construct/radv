@@ -42,7 +42,7 @@ var (
 
 var (
 	dbSPO TriplePrefix = 1
-	dbPOS TriplePrefix = 2
+	dbOPS TriplePrefix = 2
 	dbSOP TriplePrefix = 3
 )
 
@@ -138,8 +138,8 @@ func (t *Triplestore) get(txn *badger.Txn, sarr [][]byte, parr [][]byte, oarr []
 					prefix = multiAppend(dbEmpty, si, pi)
 					prefix[0] = byte(dbSPO)
 				case pi != nil && oi != nil:
-					prefix = multiAppend(dbEmpty, pi, oi)
-					prefix[0] = byte(dbPOS)
+					prefix = multiAppend(dbEmpty, oi, pi)
+					prefix[0] = byte(dbOPS)
 				case si != nil && oi != nil:
 					prefix = multiAppend(dbEmpty, si, oi)
 					prefix[0] = byte(dbSOP)
@@ -256,7 +256,7 @@ func (t *Triplestore) put(txn *badger.Txn, si []byte, pi []byte, oi []byte) erro
 	combinations := [][][]byte{
 		{[]byte{byte(dbSPO)}, si, pi, oi},
 		{[]byte{byte(dbSOP)}, si, oi, pi},
-		{[]byte{byte(dbPOS)}, pi, oi, si},
+		{[]byte{byte(dbOPS)}, oi, pi, si},
 	}
 	for _, i := range combinations {
 		// Write each combination
@@ -416,8 +416,8 @@ func subjectPredicateObject(triple []byte) ([]byte, []byte, []byte) {
 	switch tripleType {
 	case dbSPO:
 		return a, b, c
-	case dbPOS:
-		return c, a, b
+	case dbOPS:
+		return c, b, a
 	case dbSOP:
 		return a, c, b
 	}
@@ -498,4 +498,87 @@ func recurse(txn *badger.Txn, triple []byte, state State, f TraversalFunction, e
 	for _, i := range next {
 		recurse(txn, i, newstate, f, errors)
 	}
+}
+
+
+func (t *Triplestore) Delete(subject interface{}, predicate interface{}, object interface{}) error {
+
+	txn := t.db.NewTransaction(true)
+	defer txn.Discard()
+
+	//Convert subject, predicate and object into [][]byte{} containing a list of keys
+	sarr, err := t.toKeys(txn, subject, false)
+	if err != nil {
+		return err
+	}
+
+	parr, err := t.toKeys(txn, predicate, false)
+	if err != nil {
+		return err
+	}
+
+	oarr, err := t.toKeys(txn, object, false)
+	if err != nil {
+		return err
+	}
+
+
+	aspo := []byte{byte(dbSPO)}
+	aops := []byte{byte(dbOPS)}
+	asop := []byte{byte(dbSOP)}
+	spo := multiAppend(aspo, sarr[0], parr[0], oarr[0])
+	ops := multiAppend(aops, oarr[0], parr[0], sarr[0])
+	sop := multiAppend(asop, sarr[0], oarr[0], parr[0])
+	txn.Delete(spo)
+	txn.Delete(ops)
+	txn.Delete(sop)
+	err = nil
+	txn.Commit(func(e error) {
+		err = e
+	})
+	return err
+}
+
+func (t *Triplestore) DeleteEntity(entity interface{}) (int, error) {
+	// Create an update transaction
+	txn := t.db.NewTransaction(true)
+	defer txn.Discard()
+
+	// convert input value to id
+	ei, err := t.toID(txn, entity)
+	if err != nil {
+		return 0, err
+	}
+	toDelete := make(map[string][]byte)
+	aspo := []byte{byte(dbSPO)}
+	aops := []byte{byte(dbOPS)}
+	asop := []byte{byte(dbSOP)}
+	prefix1 := append(aspo,ei...)
+	prefix2 := append(aops,ei...)
+
+	it := txn.NewIterator(t.iopts)
+	defer it.Close()
+	for _, i := range [][]byte{prefix1,prefix2} {
+		for it.Seek(i); it.ValidForPrefix(i); it.Next() {
+			key := it.Item().Key()
+			s, p, o := subjectPredicateObject(key)
+			spo := multiAppend(aspo, s, p, o)
+			ops := multiAppend(aops, o, p, s)
+			sop := multiAppend(asop, s, o, p)
+			toDelete[string(spo)] = spo
+			toDelete[string(ops)] = ops
+			toDelete[string(sop)] = sop
+		}
+	}
+	it.Close()
+	c :=0
+	for _, i := range toDelete {
+		txn.Delete(i)
+		c++
+	}
+	err = nil
+	txn.Commit(func(e error) {
+		err = e
+	})
+	return c, err
 }
