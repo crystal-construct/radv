@@ -215,10 +215,7 @@ func (t *Triplestore) Put(subject interface{}, predicate interface{}, object int
 	}
 
 	// Commit the transaction
-	txn.Commit(func(e error) {
-		err = e
-	})
-	return err
+	return txn.Commit(nil)
 }
 func (t *Triplestore) toIDs(txn *badger.Txn, subject interface{}, predicate interface{}, object interface{}, b bool) ([]byte, []byte, []byte, error) {
 	// convert all input values to ids
@@ -532,11 +529,7 @@ func (t *Triplestore) Delete(subject interface{}, predicate interface{}, object 
 	txn.Delete(spo)
 	txn.Delete(ops)
 	txn.Delete(sop)
-	err = nil
-	txn.Commit(func(e error) {
-		err = e
-	})
-	return err
+	return txn.Commit(nil)
 }
 
 func (t *Triplestore) DeleteEntity(entity interface{}) (int, error) {
@@ -576,9 +569,5 @@ func (t *Triplestore) DeleteEntity(entity interface{}) (int, error) {
 		txn.Delete(i)
 		c++
 	}
-	err = nil
-	txn.Commit(func(e error) {
-		err = e
-	})
-	return c, err
+	return c, txn.Commit(nil)
 }
