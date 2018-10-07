@@ -45,6 +45,9 @@ func main() {
 	foafAge, _ := db.Get(foaf, "Age", nil)
 	fmt.Println("A:", db.Materialize(foafAge))
 
+	// Delete triple
+	db.Delete("Jane", "Knows", "Emily")
+
 	initialState := database.State{
 	}
 
@@ -63,4 +66,6 @@ func main() {
 	}
 	fmt.Println("Traversl took: ", time.Since(t))
 
+	//Delete entity
+	db.DeleteEntity("Emily")
 }
