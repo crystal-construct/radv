@@ -24,10 +24,17 @@ type State struct {
 	Val  float64
 }
 
+type TraversalOptions struct {
+	InitialState State
+}
+
+// Hash key space starts at the top half of an Int64
 const hashKeySpace = uint64(9223372036854775807)
 
 type FieldPrefix []byte
 type TriplePrefix byte
+
+type TraversalFunction func(subjectId []byte, predicateId []byte, objectId []byte, state State) (State, [][]byte, error)
 
 var dbEmpty = make([]byte, 1)
 
@@ -81,6 +88,9 @@ func (t *Triplestore) Close() {
 
 // Get performs a simple query against the triplestore.  Set one of the parameters to nil to query for that.
 func (t *Triplestore) Get(subject interface{}, predicate interface{}, object interface{}) ([][]byte, error) {
+	if nilCount(subject,predicate,object) > 1 {
+		return nil, fmt.Errorf("only one nil param is allowed")
+	}
 	// Create a read-only transaction
 	txn := t.db.NewTransaction(false)
 	defer txn.Discard()
@@ -116,6 +126,165 @@ func (t *Triplestore) Get(subject interface{}, predicate interface{}, object int
 		}
 	}
 	return res, nil
+}
+
+// Put writes a triple to the triplestore
+func (t *Triplestore) Put(subject interface{}, predicate interface{}, object interface{}) error {
+	if nilCount(subject,predicate,object) > 0 {
+		return fmt.Errorf("nil values are not allowed in put")
+	}
+	// Create an update transaction
+	txn := t.db.NewTransaction(true)
+	defer txn.Discard()
+
+	si, pi, oi, err := t.toIDs(txn, subject, predicate, object, true)
+	// Write the values to the database
+	err = t.put(txn, si, pi, oi)
+	if err != nil {
+		return err
+	}
+
+	// Commit the transaction
+	return txn.Commit(nil)
+}
+
+// Answer returns the last part of an ordered triple (usually the answer to a query)
+func Answer(bytes []byte) []byte {
+	if bytes == nil {
+		return nil
+	}
+	if len(bytes) == 9 {
+		return bytes
+	}
+	if len(bytes) == 28 {
+		return bytes[19:]
+	}
+	return nil
+}
+
+// Materialize transforms keys into values
+func (t *Triplestore) Materialize(keys [][]byte) []interface{} {
+	// Make an output array to hold the keys
+	res := make([]interface{}, len(keys))
+	// Open a read only view
+	err := t.db.View(func(txn *badger.Txn) error {
+		// Loop through the keys
+		for j, k := range keys {
+			i := Answer(k)
+			// Get the entry
+			value, err := txn.Get(i)
+			if err != nil {
+				return err
+			}
+			getValue := func(val []byte) error {
+				rval := unmarshal(val[1:])
+				res[j] = rval
+				return nil
+			}
+			value.Value(func(val []byte) error {
+				if val[0] == dbHash[0] {
+					// If the value starts with the dbHash identifier, jump and get the actual value
+					value2, _ := txn.Get(val)
+					return value2.Value(getValue)
+				}
+				return getValue(val)
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	return res
+}
+
+func (t *Triplestore) Delete(subject interface{}, predicate interface{}, object interface{}) error {
+	if nilCount(subject,predicate,object) > 0 {
+		return fmt.Errorf("nil values are not allowed in delete")
+	}
+	txn := t.db.NewTransaction(true)
+	defer txn.Discard()
+
+	//Convert subject, predicate and object into [][]byte{} containing a list of keys
+	sarr, err := t.toKeys(txn, subject, false)
+	if err != nil {
+		return err
+	}
+
+	parr, err := t.toKeys(txn, predicate, false)
+	if err != nil {
+		return err
+	}
+
+	oarr, err := t.toKeys(txn, object, false)
+	if err != nil {
+		return err
+	}
+
+
+	aspo := []byte{byte(dbSPO)}
+	aops := []byte{byte(dbOPS)}
+	asop := []byte{byte(dbSOP)}
+	spo := multiAppend(aspo, sarr[0], parr[0], oarr[0])
+	ops := multiAppend(aops, oarr[0], parr[0], sarr[0])
+	sop := multiAppend(asop, sarr[0], oarr[0], parr[0])
+	txn.Delete(spo)
+	txn.Delete(ops)
+	txn.Delete(sop)
+	return txn.Commit(nil)
+}
+
+func (t *Triplestore) DeleteEntity(entity interface{}) (int, error) {
+	if entity == nil {
+		return 0, fmt.Errorf("nil value entity is not allowed for delete entity")
+	}
+	// Create an update transaction
+	txn := t.db.NewTransaction(true)
+	defer txn.Discard()
+
+	// convert input value to id
+	ei, err := t.toID(txn, entity)
+	if err != nil {
+		return 0, err
+	}
+	toDelete := make(map[string][]byte)
+	aspo := []byte{byte(dbSPO)}
+	aops := []byte{byte(dbOPS)}
+	asop := []byte{byte(dbSOP)}
+	prefix1 := append(aspo,ei...)
+	prefix2 := append(aops,ei...)
+
+	it := txn.NewIterator(t.iopts)
+	defer it.Close()
+	for _, i := range [][]byte{prefix1,prefix2} {
+		for it.Seek(i); it.ValidForPrefix(i); it.Next() {
+			key := it.Item().Key()
+			s, p, o := subjectPredicateObject(key)
+			spo := multiAppend(aspo, s, p, o)
+			ops := multiAppend(aops, o, p, s)
+			sop := multiAppend(asop, s, o, p)
+			toDelete[string(spo)] = spo
+			toDelete[string(ops)] = ops
+			toDelete[string(sop)] = sop
+		}
+	}
+	it.Close()
+	c :=0
+	for _, i := range toDelete {
+		txn.Delete(i)
+		c++
+	}
+	return 0, txn.Commit(nil)
+}
+
+func nilCount(params ...interface{}) int8 {
+	var count int8
+	for _, i := range params{
+		if i == nil {
+			count++
+		}
+	}
+	return count
 }
 
 func (t *Triplestore) get(txn *badger.Txn, sarr [][]byte, parr [][]byte, oarr [][]byte, triples chan []byte) {
@@ -158,20 +327,6 @@ func (t *Triplestore) get(txn *badger.Txn, sarr [][]byte, parr [][]byte, oarr []
 	return
 }
 
-// Answer returns the last part of an ordered triple (usually the answer to a query)
-func Answer(bytes []byte) []byte {
-	if bytes == nil {
-		return nil
-	}
-	if len(bytes) == 9 {
-		return bytes
-	}
-	if len(bytes) == 28 {
-		return bytes[19:]
-	}
-	panic(fmt.Errorf("Bad Key"))
-}
-
 func (t *Triplestore) toKeys(txn *badger.Txn, input interface{}, create bool) ([][]uint8, error) {
 	var res [][]uint8
 	// Homogenize the input to an array of keys
@@ -200,23 +355,6 @@ func (t *Triplestore) toKeys(txn *badger.Txn, input interface{}, create bool) ([
 	return res, nil
 }
 
-// Put writes a triple to the triplestore
-func (t *Triplestore) Put(subject interface{}, predicate interface{}, object interface{}) error {
-
-	// Create an update transaction
-	txn := t.db.NewTransaction(true)
-	defer txn.Discard()
-
-	si, pi, oi, err := t.toIDs(txn, subject, predicate, object, true)
-	// Write the values to the database
-	err = t.put(txn, si, pi, oi)
-	if err != nil {
-		return err
-	}
-
-	// Commit the transaction
-	return txn.Commit(nil)
-}
 func (t *Triplestore) toIDs(txn *badger.Txn, subject interface{}, predicate interface{}, object interface{}, b bool) ([]byte, []byte, []byte, error) {
 	// convert all input values to ids
 	si, err := t.toID(txn, subject)
@@ -367,44 +505,6 @@ func store(txn *badger.Txn, key uint64, value []byte, hash []byte) ([]byte, erro
 	return k, nil
 }
 
-// Materialize transforms keys into values
-func (t *Triplestore) Materialize(keys [][]byte) []interface{} {
-	// Make an output array to hold the keys
-	res := make([]interface{}, len(keys))
-	// Open a read only view
-	err := t.db.View(func(txn *badger.Txn) error {
-		// Loop through the keys
-		for j, k := range keys {
-			i := Answer(k)
-			// Get the entry
-			value, err := txn.Get(i)
-			if err != nil {
-				return err
-			}
-			getValue := func(val []byte) error {
-				rval := unmarshal(val[1:])
-				res[j] = rval
-				return nil
-			}
-			value.Value(func(val []byte) error {
-				if val[0] == dbHash[0] {
-					// If the value starts with the dbHash identifier, jump and get the actual value
-					value2, _ := txn.Get(val)
-					return value2.Value(getValue)
-				}
-				return getValue(val)
-			})
-		}
-		return nil
-	})
-	if err != nil {
-		panic(err)
-	}
-	return res
-}
-
-type TraversalFunction func(subjectId []byte, predicateId []byte, objectId []byte, state State) (State, [][]byte, error)
-
 func subjectPredicateObject(triple []byte) ([]byte, []byte, []byte) {
 	tripleType := TriplePrefix(triple[0])
 	a := triple[1:10]
@@ -425,9 +525,11 @@ func (t *Triplestore) Traverse(
 	subject interface{},
 	predicate interface{},
 	object interface{},
-	initialState State,
+	options TraversalOptions,
 	traversalFunc TraversalFunction) error {
-
+	if nilCount(subject,predicate,object) > 1 {
+		return fmt.Errorf("only one nil value is permitted in a traversal")
+	}
 	// Create a read-only transaction
 	txn := t.db.NewTransaction(false)
 	defer txn.Discard()
@@ -466,7 +568,7 @@ func (t *Triplestore) Traverse(
 				wg.Add(1)
 				go func(){
 					defer wg.Done()
-					recurse(txn, tr, initialState, traversalFunc, errors)
+					recurse(txn, tr, options.InitialState, traversalFunc, errors)
 				}()
 			} else {
 				break
@@ -495,79 +597,4 @@ func recurse(txn *badger.Txn, triple []byte, state State, f TraversalFunction, e
 	for _, i := range next {
 		recurse(txn, i, newstate, f, errors)
 	}
-}
-
-
-func (t *Triplestore) Delete(subject interface{}, predicate interface{}, object interface{}) error {
-
-	txn := t.db.NewTransaction(true)
-	defer txn.Discard()
-
-	//Convert subject, predicate and object into [][]byte{} containing a list of keys
-	sarr, err := t.toKeys(txn, subject, false)
-	if err != nil {
-		return err
-	}
-
-	parr, err := t.toKeys(txn, predicate, false)
-	if err != nil {
-		return err
-	}
-
-	oarr, err := t.toKeys(txn, object, false)
-	if err != nil {
-		return err
-	}
-
-
-	aspo := []byte{byte(dbSPO)}
-	aops := []byte{byte(dbOPS)}
-	asop := []byte{byte(dbSOP)}
-	spo := multiAppend(aspo, sarr[0], parr[0], oarr[0])
-	ops := multiAppend(aops, oarr[0], parr[0], sarr[0])
-	sop := multiAppend(asop, sarr[0], oarr[0], parr[0])
-	txn.Delete(spo)
-	txn.Delete(ops)
-	txn.Delete(sop)
-	return txn.Commit(nil)
-}
-
-func (t *Triplestore) DeleteEntity(entity interface{}) (int, error) {
-	// Create an update transaction
-	txn := t.db.NewTransaction(true)
-	defer txn.Discard()
-
-	// convert input value to id
-	ei, err := t.toID(txn, entity)
-	if err != nil {
-		return 0, err
-	}
-	toDelete := make(map[string][]byte)
-	aspo := []byte{byte(dbSPO)}
-	aops := []byte{byte(dbOPS)}
-	asop := []byte{byte(dbSOP)}
-	prefix1 := append(aspo,ei...)
-	prefix2 := append(aops,ei...)
-
-	it := txn.NewIterator(t.iopts)
-	defer it.Close()
-	for _, i := range [][]byte{prefix1,prefix2} {
-		for it.Seek(i); it.ValidForPrefix(i); it.Next() {
-			key := it.Item().Key()
-			s, p, o := subjectPredicateObject(key)
-			spo := multiAppend(aspo, s, p, o)
-			ops := multiAppend(aops, o, p, s)
-			sop := multiAppend(asop, s, o, p)
-			toDelete[string(spo)] = spo
-			toDelete[string(ops)] = ops
-			toDelete[string(sop)] = sop
-		}
-	}
-	it.Close()
-	c :=0
-	for _, i := range toDelete {
-		txn.Delete(i)
-		c++
-	}
-	return c, txn.Commit(nil)
 }

@@ -48,12 +48,11 @@ func main() {
 	// Delete triple
 	db.Delete("Jane", "Knows", "Emily")
 
-	initialState := database.State{
-	}
+	traversalOptions := database.TraversalOptions{}
 
 	t := time.Now()
 	// A traversal starting with people John knows
-	err:= db.Traverse("John", "Knows", nil, initialState, func(subjectId []byte, predicateId []byte, objectId []byte, state database.State) (database.State, [][]byte, error) {
+	err:= db.Traverse("John", "Knows", nil, traversalOptions, func(subjectId []byte, predicateId []byte, objectId []byte, state database.State) (database.State, [][]byte, error) {
 		// Print out the path for each traversal
 		fmt.Println(db.Materialize(state.Path))
 		// Get the next triples to traverse
