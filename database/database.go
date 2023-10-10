@@ -64,7 +64,7 @@ var (
 
 // New creates a new triplestore
 func New(directory string) *Triplestore {
-	opts := badger.DefaultOptions
+	opts := badger.DefaultOptions("")
 	opts.Dir = directory
 	opts.ValueDir = directory
 
@@ -88,7 +88,7 @@ func (t *Triplestore) Close() {
 
 // Get performs a simple query against the triplestore.  Set one of the parameters to nil to query for that.
 func (t *Triplestore) Get(subject interface{}, predicate interface{}, object interface{}) ([][]byte, error) {
-	if nilCount(subject,predicate,object) > 1 {
+	if nilCount(subject, predicate, object) > 1 {
 		return nil, fmt.Errorf("only one nil param is allowed")
 	}
 	// Create a read-only transaction
@@ -130,7 +130,7 @@ func (t *Triplestore) Get(subject interface{}, predicate interface{}, object int
 
 // Put writes a triple to the triplestore
 func (t *Triplestore) Put(subject interface{}, predicate interface{}, object interface{}) error {
-	if nilCount(subject,predicate,object) > 0 {
+	if nilCount(subject, predicate, object) > 0 {
 		return fmt.Errorf("nil values are not allowed in put")
 	}
 	// Create an update transaction
@@ -145,7 +145,7 @@ func (t *Triplestore) Put(subject interface{}, predicate interface{}, object int
 	}
 
 	// Commit the transaction
-	return txn.Commit(nil)
+	return txn.Commit()
 }
 
 // Answer returns the last part of an ordered triple (usually the answer to a query)
@@ -199,7 +199,7 @@ func (t *Triplestore) Materialize(keys [][]byte) []interface{} {
 }
 
 func (t *Triplestore) Delete(subject interface{}, predicate interface{}, object interface{}) error {
-	if nilCount(subject,predicate,object) > 0 {
+	if nilCount(subject, predicate, object) > 0 {
 		return fmt.Errorf("nil values are not allowed in delete")
 	}
 	txn := t.db.NewTransaction(true)
@@ -221,7 +221,6 @@ func (t *Triplestore) Delete(subject interface{}, predicate interface{}, object 
 		return err
 	}
 
-
 	aspo := []byte{byte(dbSPO)}
 	aops := []byte{byte(dbOPS)}
 	asop := []byte{byte(dbSOP)}
@@ -231,7 +230,7 @@ func (t *Triplestore) Delete(subject interface{}, predicate interface{}, object 
 	txn.Delete(spo)
 	txn.Delete(ops)
 	txn.Delete(sop)
-	return txn.Commit(nil)
+	return txn.Commit()
 }
 
 func (t *Triplestore) DeleteEntity(entity interface{}) (int, error) {
@@ -251,12 +250,12 @@ func (t *Triplestore) DeleteEntity(entity interface{}) (int, error) {
 	aspo := []byte{byte(dbSPO)}
 	aops := []byte{byte(dbOPS)}
 	asop := []byte{byte(dbSOP)}
-	prefix1 := append(aspo,ei...)
-	prefix2 := append(aops,ei...)
+	prefix1 := append(aspo, ei...)
+	prefix2 := append(aops, ei...)
 
 	it := txn.NewIterator(t.iopts)
 	defer it.Close()
-	for _, i := range [][]byte{prefix1,prefix2} {
+	for _, i := range [][]byte{prefix1, prefix2} {
 		for it.Seek(i); it.ValidForPrefix(i); it.Next() {
 			key := it.Item().Key()
 			s, p, o := subjectPredicateObject(key)
@@ -269,17 +268,17 @@ func (t *Triplestore) DeleteEntity(entity interface{}) (int, error) {
 		}
 	}
 	it.Close()
-	c :=0
+	c := 0
 	for _, i := range toDelete {
 		txn.Delete(i)
 		c++
 	}
-	return 0, txn.Commit(nil)
+	return 0, txn.Commit()
 }
 
 func nilCount(params ...interface{}) int8 {
 	var count int8
-	for _, i := range params{
+	for _, i := range params {
 		if i == nil {
 			count++
 		}
@@ -527,7 +526,7 @@ func (t *Triplestore) Traverse(
 	object interface{},
 	options TraversalOptions,
 	traversalFunc TraversalFunction) error {
-	if nilCount(subject,predicate,object) > 1 {
+	if nilCount(subject, predicate, object) > 1 {
 		return fmt.Errorf("only one nil value is permitted in a traversal")
 	}
 	// Create a read-only transaction
@@ -566,7 +565,7 @@ func (t *Triplestore) Traverse(
 			tr, more := <-triples
 			if more {
 				wg.Add(1)
-				go func(){
+				go func() {
 					defer wg.Done()
 					recurse(txn, tr, options.InitialState, traversalFunc, errors)
 				}()
@@ -580,10 +579,10 @@ func (t *Triplestore) Traverse(
 	}()
 
 	select {
-		case <- complete:
-			return nil
-		case err := <- errors:
-			return err
+	case <-complete:
+		return nil
+	case err := <-errors:
+		return err
 	}
 }
 

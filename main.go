@@ -10,9 +10,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"radv/database"
 	"time"
-
-	"./database"
 )
 
 func main() {
@@ -52,7 +51,7 @@ func main() {
 
 	t := time.Now()
 	// A traversal starting with people John knows
-	err:= db.Traverse("John", "Knows", nil, traversalOptions, func(subjectId []byte, predicateId []byte, objectId []byte, state database.State) (database.State, [][]byte, error) {
+	err := db.Traverse("John", "Knows", nil, traversalOptions, func(subjectId []byte, predicateId []byte, objectId []byte, state database.State) (database.State, [][]byte, error) {
 		// Print out the path for each traversal
 		fmt.Println(db.Materialize(state.Path))
 		// Get the next triples to traverse
